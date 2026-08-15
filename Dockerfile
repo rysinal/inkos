@@ -36,7 +36,7 @@ COPY --chown=node:node railway-entrypoint.sh ./railway-entrypoint.sh
 
 RUN mkdir -p /data && chown node:node /data
 
-USER node
+USER root
 EXPOSE 4567
 
 CMD ["sh", "/app/railway-entrypoint.sh"]

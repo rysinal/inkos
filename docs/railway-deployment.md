@@ -10,7 +10,7 @@ InkOS Studio persists books, sessions, task snapshots, uploads, prompt overrides
 - Railway supplies `PORT`; Studio also accepts `INKOS_STUDIO_PORT` for non-Railway deployments.
 - Use `/healthz` for readiness. This endpoint does not expose project or provider data.
 
-On the first boot, the container creates a minimal Chinese-language InkOS project only when `inkos.json` is absent. Subsequent boots never overwrite the persisted project.
+On the first boot, the container creates a minimal Chinese-language InkOS project only when `inkos.json` is absent and prepares the root-owned Railway volume for the unprivileged `node` process. Subsequent boots never overwrite the persisted project.
 
 PostgreSQL, Redis, and S3 are intentionally not part of this deployment. InkOS has no adapter for them in its project storage path, so adding those services would not make the actual books or task snapshots durable.
 

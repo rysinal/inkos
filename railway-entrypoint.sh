@@ -30,4 +30,11 @@ if [ ! -f /data/inkos.json ]; then
 }' > /data/inkos.json
 fi
 
-exec node packages/studio/dist/api/index.js /data
+if [ ! -f /data/.inkos-node-owned ]; then
+  chown -R node:node /data
+  touch /data/.inkos-node-owned
+  chown node:node /data/.inkos-node-owned
+fi
+
+exec setpriv --reuid=node --regid=node --init-groups \
+  node packages/studio/dist/api/index.js /data
