@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import { basicAuth } from "hono/basic-auth";
 import { cors } from "hono/cors";
+import { HTTPException } from "hono/http-exception";
 import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
 import { gzipSync } from "node:zlib";
@@ -2826,6 +2828,18 @@ async function probeServiceCapabilities(args: {
 
 export function createStudioServer(initialConfig: ProjectConfig, root: string, overrides: { readonly nodeImageGenerator?: NodeImageDeps } = {}) {
   const app = new Hono();
+  const authUsername = process.env.INKOS_STUDIO_AUTH_USERNAME?.trim();
+  const authPassword = process.env.INKOS_STUDIO_AUTH_PASSWORD?.trim();
+
+  app.get("/healthz", (c) => c.json({ status: "ok" }));
+
+  if (process.env.NODE_ENV === "production" && (!authUsername || !authPassword)) {
+    throw new Error("INKOS_STUDIO_AUTH_USERNAME and INKOS_STUDIO_AUTH_PASSWORD are required in production.");
+  }
+  if (authUsername && authPassword) {
+    app.use("/*", basicAuth({ username: authUsername, password: authPassword }));
+  }
+
   const state = new StateManager(root);
   let cachedConfig = initialConfig;
   const activeConfirmedTasks = new Map<string, AbortController>();
@@ -2931,6 +2945,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   // Structured error handler — ApiError returns typed JSON, others return 500
   app.onError((error, c) => {
+    if (error instanceof HTTPException) {
+      return error.getResponse();
+    }
     if (error instanceof ApiError) {
       return c.json({ error: { code: error.code, message: error.message } }, error.status as 400);
     }
@@ -6969,5 +6986,5 @@ export async function startStudioServer(
   }
 
   console.log(`InkOS Studio running on http://localhost:${port}`);
-  serve({ fetch: app.fetch, port });
+  serve({ fetch: app.fetch, port, hostname: "0.0.0.0" });
 }

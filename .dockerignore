@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+packages/*/node_modules
+packages/*/dist
+packages/studio/playwright-report
+packages/studio/test-results
+assets
+test-project
+*.log
