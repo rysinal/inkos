@@ -27,12 +27,17 @@ export abstract class BaseAgent {
 
   protected async chat(
     messages: ReadonlyArray<LLMMessage>,
-    options?: { readonly temperature?: number; readonly maxTokens?: number },
+    options?: {
+      readonly temperature?: number;
+      readonly maxTokens?: number;
+      readonly signal?: AbortSignal;
+    },
   ): Promise<LLMResponse> {
+    const { signal = this.ctx.signal, ...completionOptions } = options ?? {};
     return chatCompletion(this.ctx.client, this.ctx.model, messages, {
-      ...options,
+      ...completionOptions,
       onStreamProgress: this.ctx.onStreamProgress,
-      signal: this.ctx.signal,
+      signal,
     });
   }
 

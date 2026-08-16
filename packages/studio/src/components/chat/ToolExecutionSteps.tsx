@@ -730,7 +730,7 @@ function StateRepairAction({
           {status === "running"
             ? tr("正在修复状态…", "Repairing state…")
             : status === "completed"
-              ? tr("状态已修复，请重试写作", "State repaired. Retry writing")
+              ? tr("状态已修复，可继续写下一章", "State repaired. You can write the next chapter")
               : tr(`修复第 ${details.chapterNumber} 章状态`, `Repair chapter ${details.chapterNumber} state`)}
         </button>
         {status === "error" && repairError && <div className="mt-2">{repairError}</div>}

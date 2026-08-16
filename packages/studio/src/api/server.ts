@@ -1309,7 +1309,7 @@ function classifyAgentFailure(message: string): AgentFailureKind {
     return "conflict";
   }
   if (
-    /API\s*返回|上游|upstream|Bad Gateway|temporarily unavailable|rate limit|quota|API Key|unauthorized|forbidden|无法连接到 API|fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|LLM returned empty response|Provider finish_reason|reasoning_content/i.test(text)
+    /API\s*返回|上游|upstream|Bad Gateway|temporarily unavailable|rate limit|quota|API Key|unauthorized|forbidden|无法连接到 API|fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|TimeoutError|timed out|timeout|LLM returned empty response|Provider finish_reason|reasoning_content/i.test(text)
   ) {
     return "llm";
   }

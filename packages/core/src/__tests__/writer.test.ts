@@ -607,6 +607,90 @@ describe("WriterAgent", () => {
     }
   });
 
+  it("bounds the settlement format retry with an abortable timeout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-format-timeout-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+    ]);
+
+    const parentController = new AbortController();
+    const timeoutController = new AbortController();
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutController.signal);
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+      signal: parentController.signal,
+    });
+
+    let retrySignal: AbortSignal | undefined;
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "invalid settlement output",
+        usage: ZERO_USAGE,
+      })
+      .mockImplementationOnce(((
+        _messages: unknown,
+        options?: { readonly signal?: AbortSignal },
+      ) => {
+        retrySignal = options?.signal;
+        return new Promise((_resolve, reject) => {
+          retrySignal?.addEventListener("abort", () => reject(retrySignal?.reason), { once: true });
+        });
+      }) as never);
+
+    try {
+      const pending = agent.settleChapterState({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "en",
+          createdAt: "2026-08-16T00:00:00.000Z",
+          updatedAt: "2026-08-16T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 3,
+        title: "River Ledger",
+        content: "Lin Yue follows the debt into the river-port ledger.",
+      });
+
+      await vi.waitFor(() => expect(retrySignal).toBeDefined());
+      expect(timeoutSpy).toHaveBeenCalledWith(8 * 60_000);
+      expect(retrySignal?.aborted).toBe(false);
+
+      timeoutController.abort(new DOMException("settlement format retry timed out", "TimeoutError"));
+      await expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+      expect(parentController.signal.aborted).toBe(false);
+      expect(chatSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("overrides hallucinated chapter numbers across both delta and summary row", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-runtime-state-hallucinated-chapter-test-"));
     const bookDir = join(root, "book");

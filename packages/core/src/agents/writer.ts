@@ -7,6 +7,8 @@ import { buildSettlerSystemPrompt, buildSettlerUserPrompt } from "./settler-prom
 import { buildObserverSystemPrompt, buildObserverUserPrompt } from "./observer-prompts.js";
 import { parseSettlerDeltaOutput } from "./settler-delta-parser.js";
 import { parseSettlementOutput } from "./settler-parser.js";
+
+const SETTLEMENT_FORMAT_RETRY_TIMEOUT_MS = 8 * 60_000;
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
 import {
   detectCrossChapterRepetition,
@@ -731,12 +733,16 @@ export class WriterAgent extends BaseAgent {
           zh: "状态结算格式无效，正在仅重试结算格式",
           en: "State settlement format is invalid; retrying settlement formatting only",
         });
+        const timeoutSignal = AbortSignal.timeout(SETTLEMENT_FORMAT_RETRY_TIMEOUT_MS);
+        const retrySignal = this.ctx.signal
+          ? AbortSignal.any([this.ctx.signal, timeoutSignal])
+          : timeoutSignal;
         response = await this.chat(
           [
             { role: "system", content: settlerSystem },
             { role: "user", content: buildSettlementFormatRetryPrompt(settlerUser) },
           ],
-          { temperature: 0.1 },
+          { temperature: 0.1, signal: retrySignal },
         );
         usage = addTokenUsage(usage, response.usage);
         const corrected = parseSettlerDeltaOutput(response.content);
