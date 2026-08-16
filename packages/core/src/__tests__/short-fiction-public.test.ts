@@ -10,6 +10,7 @@ import {
 } from "../agents/short-fiction.js";
 import { saveSecrets } from "../llm/secrets.js";
 import {
+  buildImagesGenerationRequestBody,
   extractGeminiImageBase64,
   extractImagesGenerationImage,
   generateShortFictionCover,
@@ -218,6 +219,22 @@ describe("public short-fiction chain", () => {
     expect(extractImagesGenerationImage({
       data: [{ b64_json: "ZmFrZQ==" }],
     })).toEqual({ base64: "ZmFrZQ==", extension: "png" });
+  });
+
+  it("uses model-specific CLI Proxy image parameters", () => {
+    expect(buildImagesGenerationRequestBody("gpt-image-2", "cover", "1024x1536")).toEqual({
+      model: "gpt-image-2",
+      prompt: "cover",
+      n: 1,
+      size: "1024x1536",
+    });
+    expect(buildImagesGenerationRequestBody("grok-imagine-image", "cover", "1024x1360")).toEqual({
+      model: "grok-imagine-image",
+      prompt: "cover",
+      n: 1,
+      aspect_ratio: "3:4",
+      resolution: "1k",
+    });
   });
 
   it("extracts Gemini inline image data from generateContent responses", () => {

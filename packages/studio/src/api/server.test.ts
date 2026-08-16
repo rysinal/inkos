@@ -2393,6 +2393,29 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("accepts CLI Proxy Grok image models for cover generation", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/cover/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        service: "cli-proxy",
+        model: "grok-imagine-image",
+        baseUrl: "http://cli-proxy-api.railway.internal:8317/v1",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
+    expect(raw.llm.cover).toEqual({
+      service: "cli-proxy",
+      model: "grok-imagine-image",
+      baseUrl: "http://cli-proxy-api.railway.internal:8317/v1",
+    });
+  });
+
   it("rejects invalid custom cover base URLs without changing project config", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);

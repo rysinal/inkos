@@ -728,12 +728,7 @@ async function generateImagesCover(
       "Content-Type": "application/json",
       Authorization: `Bearer ${request.apiKey}`,
     },
-    body: JSON.stringify({
-      model: request.model,
-      prompt,
-      n: 1,
-      size,
-    }),
+    body: JSON.stringify(buildImagesGenerationRequestBody(request.model, prompt, size)),
     signal,
   });
   const text = await response.text();
@@ -759,6 +754,32 @@ async function generateImagesCover(
     return downloadGeneratedCoverImage(image.url, request.apiKey, signal);
   }
   throw new Error("cover generation response did not include image URL or base64 data.");
+}
+
+function resolveGrokAspectRatio(size: string): string {
+  const ratios: Record<string, string> = {
+    "1024x1024": "1:1",
+    "1024x1360": "3:4",
+    "1024x1536": "2:3",
+    "1360x1024": "4:3",
+    "1536x1024": "3:2",
+  };
+  return ratios[size] ?? "1:1";
+}
+
+export function buildImagesGenerationRequestBody(
+  model: string,
+  prompt: string,
+  size: string,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { model, prompt, n: 1 };
+  if (model.startsWith("grok-imagine-image")) {
+    body.aspect_ratio = resolveGrokAspectRatio(size);
+    body.resolution = "1k";
+  } else {
+    body.size = size;
+  }
+  return body;
 }
 
 export function extractImagesGenerationImage(payload: unknown): (

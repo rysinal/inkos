@@ -1,4 +1,4 @@
-export type CoverProviderId = "kkaiapi" | "openai" | "google";
+export type CoverProviderId = "kkaiapi" | "openai" | "google" | "cli-proxy";
 
 export interface CoverProviderPreset {
   readonly service: CoverProviderId;
@@ -10,6 +10,14 @@ export interface CoverProviderPreset {
 }
 
 export const COVER_PROVIDER_PRESETS: readonly CoverProviderPreset[] = [
+  {
+    service: "cli-proxy",
+    label: "CLI Proxy Images",
+    baseUrl: "http://127.0.0.1:8317/v1",
+    api: "images",
+    defaultModel: "gpt-image-2",
+    models: ["gpt-image-2", "grok-imagine-image", "grok-imagine-image-quality"],
+  },
   {
     service: "kkaiapi",
     label: "kkaiapi",
