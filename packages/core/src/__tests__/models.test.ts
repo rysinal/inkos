@@ -341,6 +341,22 @@ describe("ProjectConfigSchema", () => {
     expect(result.version).toBe("0.1.0");
   });
 
+  it("accepts CLI Proxy as the cover image service", () => {
+    const result = ProjectConfigSchema.parse({
+      ...validProject,
+      llm: {
+        ...validProject.llm,
+        cover: {
+          service: "cli-proxy",
+          model: "gpt-image-2",
+          baseUrl: "http://cli-proxy-api.railway.internal:8317/v1",
+        },
+      },
+    });
+
+    expect(result.llm.cover?.service).toBe("cli-proxy");
+  });
+
   it("applies default daemon config", () => {
     const result = ProjectConfigSchema.parse(validProject);
     expect(result.daemon.maxConcurrentBooks).toBe(3);
