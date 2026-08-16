@@ -493,6 +493,56 @@ describe("applyRuntimeStateDelta", () => {
     ]);
   });
 
+  it("keeps the latest settlement note when an existing hook advances and resolves", () => {
+    const result = applyRuntimeStateDelta({
+      snapshot: {
+        manifest: {
+          schemaVersion: 2,
+          language: "zh",
+          lastAppliedChapter: 7,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        },
+        currentState: { chapter: 7, facts: [] },
+        hooks: {
+          hooks: [{
+            hookId: "hook-8",
+            startChapter: 7,
+            type: "mystery",
+            status: "open",
+            lastAdvancedChapter: 7,
+            expectedPayoff: "解释深处落砂为何停止。",
+            notes: "深处落砂已经停止，但停止原因仍然完全未知。",
+          }],
+        },
+        chapterSummaries: { rows: [] },
+      },
+      delta: RuntimeStateDeltaSchema.parse({
+        chapter: 8,
+        hookOps: {
+          upsert: [{
+            hookId: "hook-8",
+            startChapter: 7,
+            type: "mystery",
+            status: "progressing",
+            lastAdvancedChapter: 8,
+            expectedPayoff: "解释深处落砂为何停止。",
+            notes: "壁后施力压实松砂并切断气流。",
+          }],
+          mention: [],
+          resolve: ["hook-8"],
+          defer: [],
+        },
+      }),
+    });
+
+    expect(result.hooks.hooks[0]).toEqual(expect.objectContaining({
+      status: "resolved",
+      lastAdvancedChapter: 8,
+      notes: "壁后施力压实松砂并切断气流。",
+    }));
+  });
+
   it("merges duplicate restated hook families into the matched active hook", () => {
     const result = applyRuntimeStateDelta({
       snapshot: {

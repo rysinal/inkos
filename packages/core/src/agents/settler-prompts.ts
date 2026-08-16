@@ -164,7 +164,7 @@ function buildSettlerOutputFormat(gp: GenreProfile): string {
 4. brand-new unresolved thread 一律写进 newHookCandidates，不要自造 hookId
 5. 如果旧 hook 只是被提到、没有真实状态变化，把它放进 mention，不要更新 lastAdvancedChapter
 6. 如果本章推进了旧 hook，lastAdvancedChapter 必须等于当前章号
-7. 如果回收或延后 hook，必须放在 resolve / defer 数组里
+7. 如果回收或延后 hook，必须同时在 upsert 中把 lastAdvancedChapter 和 notes 更新为本章结算，并把 hookId 放进 resolve / defer 数组；不能只改状态而保留过期备注
 8. currentStatePatch 只更新六个固定字段；当前状态卡里的其他命名字段必须通过 stateFactOps.upsert 按原 predicate 更新，不能留下与正文冲突的旧值
 9. chapterSummary.chapter 必须等于当前章节号`;
 }

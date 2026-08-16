@@ -151,9 +151,12 @@ function mergeDuplicateHookFamily(existing: HookRecord, incoming: HookRecord): H
 
 function mergeHookRecord(existing: HookRecord, incoming: HookRecord): HookRecord {
   const expectedPayoff = preferRicherText(existing.expectedPayoff, incoming.expectedPayoff);
-  const notes = preferRicherText(existing.notes, incoming.notes);
   const advanced = Math.max(existing.lastAdvancedChapter, incoming.lastAdvancedChapter);
   const progressed = advanced > existing.lastAdvancedChapter;
+  const incomingNotes = incoming.notes.trim();
+  const notes = progressed && incomingNotes
+    ? incomingNotes
+    : preferRicherText(existing.notes, incoming.notes);
 
   return {
     ...existing,
