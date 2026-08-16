@@ -8,7 +8,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 FROM base AS dependencies
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY packages/core/package.json ./packages/core/package.json
 COPY packages/studio/package.json ./packages/studio/package.json
 COPY packages/cli/package.json ./packages/cli/package.json
