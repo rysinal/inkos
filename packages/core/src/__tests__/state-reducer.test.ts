@@ -102,6 +102,65 @@ describe("applyRuntimeStateDelta", () => {
     expect(result.chapterSummaries.rows.map((row) => row.chapter)).toEqual([11, 12]);
   });
 
+  it("updates named legacy state fields without leaving stale facts behind", () => {
+    const result = applyRuntimeStateDelta({
+      snapshot: {
+        manifest: {
+          schemaVersion: 2,
+          language: "zh",
+          lastAppliedChapter: 7,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        },
+        currentState: {
+          chapter: 7,
+          facts: [
+            {
+              subject: "乌尔奇奥拉",
+              predicate: "乌尔奇奥拉状态",
+              object: "肩背尚未擦伤。",
+              validFromChapter: 7,
+              validUntilChapter: null,
+              sourceChapter: 7,
+            },
+            {
+              subject: "current_state",
+              predicate: "样本状态",
+              object: "保存三份样本。",
+              validFromChapter: 7,
+              validUntilChapter: null,
+              sourceChapter: 7,
+            },
+          ],
+        },
+        hooks: { hooks: [] },
+        chapterSummaries: { rows: [] },
+      },
+      delta: RuntimeStateDeltaSchema.parse({
+        chapter: 8,
+        stateFactOps: {
+          upsert: [
+            { predicate: "乌尔奇奥拉状态", object: "肩背新增擦伤，黑屑继续增加。" },
+            { predicate: "样本状态", object: "四份样本均保持独立封存。" },
+          ],
+          remove: [],
+        },
+      }),
+    });
+
+    expect(result.currentState.chapter).toBe(8);
+    expect(result.currentState.facts.filter((fact) => fact.predicate === "乌尔奇奥拉状态")).toEqual([
+      expect.objectContaining({
+        object: "肩背新增擦伤，黑屑继续增加。",
+        validFromChapter: 8,
+        sourceChapter: 8,
+      }),
+    ]);
+    expect(result.currentState.facts.filter((fact) => fact.predicate === "样本状态")).toEqual([
+      expect.objectContaining({ object: "四份样本均保持独立封存。" }),
+    ]);
+  });
+
   it("rejects duplicate summary rows for the same chapter", () => {
     expect(() =>
       applyRuntimeStateDelta({

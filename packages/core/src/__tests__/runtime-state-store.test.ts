@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildRuntimeStateArtifacts,
   loadNarrativeMemorySeed,
+  loadRuntimeStateProjections,
   loadRuntimeStateSnapshot,
   loadSnapshotCurrentStateFacts,
 } from "../state/runtime-state-store.js";
@@ -17,6 +18,40 @@ describe("runtime-state-store memory helpers", () => {
       await rm(root, { recursive: true, force: true });
       root = "";
     }
+  });
+
+  it("projects canonical hook ids for legacy bullet-list truth files", async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-runtime-state-projection-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+    await mkdir(storyDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(bookDir, "book.json"), JSON.stringify({ language: "zh" }), "utf-8"),
+      writeFile(join(chaptersDir, "index.json"), JSON.stringify([
+        { number: 1, title: "Ch1", status: "approved" },
+      ]), "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), [
+        "# 当前状态",
+        "",
+        "| 字段 | 值 |",
+        "| --- | --- |",
+        "| 当前章节 | 1 |",
+        "| 样本状态 | 三份样本独立封存 |",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), [
+        "# 当前伏笔池",
+        "",
+        "- [open] 入口追踪危机仍未解决。",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "", "utf-8"),
+    ]);
+
+    const projections = await loadRuntimeStateProjections(bookDir);
+
+    expect(projections.currentStateMarkdown).toContain("- 样本状态: 三份样本独立封存");
+    expect(projections.hooksMarkdown).toContain("| hook-1 | 0 | unspecified | open | 0 |");
   });
 
   it("prefers structured runtime state over stale markdown projections for narrative memory", async () => {

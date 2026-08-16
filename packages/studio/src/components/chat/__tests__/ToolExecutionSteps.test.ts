@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ToolExecution } from "../../../store/chat/types";
-import { PipelineResultDetails, ToolExecutionSteps, UtilityExecutionRow, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically } from "../ToolExecutionSteps";
+import { PipelineResultDetails, ToolExecutionSteps, UtilityExecutionRow, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, getStateRepairDetails, groupToolExecutionsChronologically } from "../ToolExecutionSteps";
 import { usePreferencesStore } from "../../../store/preferences";
 import { setAppLanguage } from "../../../lib/app-language";
 
@@ -177,6 +177,51 @@ describe("groupChronologically", () => {
 
     expect(html).toContain("查看操作结果");
     expect(html).toContain("已完成第 1 章：雨棚");
+  });
+
+  it("offers an inline repair action for a state-degraded writer task", () => {
+    const exec = makeExec({
+      id: "writer-degraded-1",
+      tool: "sub_agent",
+      agent: "writer",
+      label: "写作",
+      status: "error",
+      args: { bookId: "月落于无心之地" },
+      error: "Latest chapter 8 is state-degraded. Repair state or rewrite that chapter before continuing.",
+    });
+
+    expect(getStateRepairDetails(exec)).toEqual({
+      bookId: "月落于无心之地",
+      chapterNumber: 8,
+    });
+
+    const html = renderToStaticMarkup(React.createElement(ToolExecutionSteps, {
+      executions: [exec],
+      onRepairState: async () => undefined,
+    }));
+
+    expect(html).toContain("最新第 8 章处于状态降级");
+    expect(html).toContain("修复第 8 章状态");
+    expect(html).not.toContain("Latest chapter 8 is state-degraded");
+  });
+
+  it("does not offer state repair for unrelated task failures", () => {
+    const exec = makeExec({
+      id: "writer-network-1",
+      tool: "sub_agent",
+      agent: "writer",
+      label: "写作",
+      status: "error",
+      args: { bookId: "月落于无心之地" },
+      error: "upstream temporarily unavailable",
+    });
+
+    expect(getStateRepairDetails(exec)).toBeNull();
+    const html = renderToStaticMarkup(React.createElement(ToolExecutionSteps, {
+      executions: [exec],
+      onRepairState: async () => undefined,
+    }));
+    expect(html).not.toContain("修复状态");
   });
 
   it("extracts generated cover details from public short fiction tools", () => {

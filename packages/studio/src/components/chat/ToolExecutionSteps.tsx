@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { buildApiUrl } from "../../hooks/use-api";
 import { tr } from "../../lib/app-language";
+import { localizeKnownRuntimeMessage } from "../../lib/error-copy";
 import { chatSelectors, useChatStore } from "../../store/chat";
 import { usePreferencesStore } from "../../store/preferences";
 import {
@@ -150,6 +151,20 @@ export interface ProposedActionDetails {
   readonly instruction?: string;
   readonly requestedSkills?: ReadonlyArray<string>;
   readonly actionPayload?: ChatActionPayload;
+}
+
+export interface StateRepairDetails {
+  readonly bookId: string;
+  readonly chapterNumber: number;
+}
+
+export function getStateRepairDetails(exec: ToolExecution): StateRepairDetails | null {
+  if (exec.status !== "error" || exec.tool !== "sub_agent" || exec.agent !== "writer") return null;
+  const bookId = typeof exec.args?.bookId === "string" ? exec.args.bookId.trim() : "";
+  const chapter = exec.error?.match(/Latest chapter (\d+) is state-degraded/i)?.[1];
+  const chapterNumber = chapter ? Number.parseInt(chapter, 10) : Number.NaN;
+  if (!bookId || !Number.isSafeInteger(chapterNumber) || chapterNumber < 1) return null;
+  return { bookId, chapterNumber };
 }
 
 function stringField(record: Record<string, unknown>, key: string): string | undefined {
@@ -678,6 +693,52 @@ export function PipelineResultDetails({ result, defaultOpen }: { result: string;
   );
 }
 
+function StateRepairAction({
+  details,
+  error,
+  onRepairState,
+}: {
+  readonly details: StateRepairDetails;
+  readonly error: string;
+  readonly onRepairState: (details: StateRepairDetails) => void | Promise<void>;
+}) {
+  const [status, setStatus] = useState<"idle" | "running" | "completed" | "error">("idle");
+  const [repairError, setRepairError] = useState("");
+
+  const repair = async () => {
+    setStatus("running");
+    setRepairError("");
+    try {
+      await onRepairState(details);
+      setStatus("completed");
+    } catch (cause) {
+      setRepairError(localizeKnownRuntimeMessage(cause instanceof Error ? cause.message : String(cause)));
+      setStatus("error");
+    }
+  };
+
+  return (
+    <div className="mx-3 mb-3 mt-1 rounded-lg bg-destructive/5 px-3 py-2.5 text-xs text-destructive">
+      <div>{localizeKnownRuntimeMessage(error)}</div>
+      <div className="mt-2">
+        <button
+          type="button"
+          onClick={() => void repair()}
+          disabled={status === "running" || status === "completed"}
+          className="rounded-md border border-destructive/25 bg-background px-2.5 py-1.5 font-medium transition-colors hover:bg-destructive/10 disabled:opacity-60"
+        >
+          {status === "running"
+            ? tr("正在修复状态…", "Repairing state…")
+            : status === "completed"
+              ? tr("状态已修复，请重试写作", "State repaired. Retry writing")
+              : tr(`修复第 ${details.chapterNumber} 章状态`, `Repair chapter ${details.chapterNumber} state`)}
+        </button>
+        {status === "error" && repairError && <div className="mt-2">{repairError}</div>}
+      </div>
+    </div>
+  );
+}
+
 function PipelineExecution({
   exec,
   onProposedAction,
@@ -685,6 +746,7 @@ function PipelineExecution({
   onOpenFilmStudio,
   onSelectNarrativeBranch,
   onRecheckNarrativeForecast,
+  onRepairState,
 }: {
   exec: ToolExecution;
   onProposedAction?: (details: ProposedActionDetails) => void;
@@ -692,6 +754,7 @@ function PipelineExecution({
   onOpenFilmStudio?: (projectId: string) => void;
   onSelectNarrativeBranch?: (forecastId: string, branchId: string) => void | Promise<void>;
   onRecheckNarrativeForecast?: (forecastId: string) => void | Promise<void>;
+  onRepairState?: (details: StateRepairDetails) => void | Promise<void>;
 }) {
   const isActive = exec.status === "running" || exec.status === "processing";
   const [open, setOpen] = useState(isActive);
@@ -708,6 +771,7 @@ function PipelineExecution({
 
   const bookId = exec.args?.bookId as string | undefined;
   const forecastDetails = getNarrativeForecastPreviewDetails(exec);
+  const stateRepairDetails = getStateRepairDetails(exec);
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-xl border border-border/40 bg-card/60">
@@ -744,6 +808,9 @@ function PipelineExecution({
       />
       {!forecastDetails && typeof exec.result === "string" && exec.result.trim() && (
         <PipelineResultDetails result={exec.result} defaultOpen={toolDetailsDefaultOpen} />
+      )}
+      {stateRepairDetails && exec.error && onRepairState && (
+        <StateRepairAction details={stateRepairDetails} error={exec.error} onRepairState={onRepairState} />
       )}
       <CollapsibleContent>
         <div className="px-3 pb-3 pt-1">
@@ -784,9 +851,9 @@ function PipelineExecution({
               })}
             </ul>
           )}
-          {exec.status === "error" && exec.error && (
+          {exec.status === "error" && exec.error && !(stateRepairDetails && onRepairState) && (
             <div className="mt-2 text-xs text-destructive bg-destructive/5 rounded-lg px-2.5 py-2">
-              {exec.error}
+              {localizeKnownRuntimeMessage(exec.error)}
             </div>
           )}
         </div>
@@ -875,6 +942,7 @@ export interface ToolExecutionStepsProps {
   onOpenFilmStudio?: (projectId: string) => void;
   onSelectNarrativeBranch?: (forecastId: string, branchId: string) => void | Promise<void>;
   onRecheckNarrativeForecast?: (forecastId: string) => void | Promise<void>;
+  onRepairState?: (details: StateRepairDetails) => void | Promise<void>;
 }
 
 /**
@@ -915,6 +983,7 @@ export const ToolExecutionSteps = memo(function ToolExecutionSteps({
   onOpenFilmStudio,
   onSelectNarrativeBranch,
   onRecheckNarrativeForecast,
+  onRepairState,
 }: ToolExecutionStepsProps) {
   const groups = useMemo(() => groupToolExecutionsChronologically(executions), [executions]);
 
@@ -931,6 +1000,7 @@ export const ToolExecutionSteps = memo(function ToolExecutionSteps({
                 onOpenFilmStudio={onOpenFilmStudio}
                 onSelectNarrativeBranch={onSelectNarrativeBranch}
                 onRecheckNarrativeForecast={onRecheckNarrativeForecast}
+                onRepairState={onRepairState}
               />
             )
           : <UtilityToolsGroup key={`utils-${i}`} execs={g.execs} />

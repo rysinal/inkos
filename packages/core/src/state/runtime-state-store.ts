@@ -22,6 +22,11 @@ export interface RuntimeStateArtifacts {
   readonly chapterSummariesMarkdown: string;
 }
 
+export interface RuntimeStateProjections {
+  readonly currentStateMarkdown: string;
+  readonly hooksMarkdown: string;
+}
+
 export interface NarrativeMemorySeed {
   readonly summaries: ReadonlyArray<StoredSummary>;
   readonly hooks: ReadonlyArray<StoredHook>;
@@ -54,6 +59,16 @@ export async function loadRuntimeStateSnapshot(bookDir: string): Promise<Runtime
   }
 
   return snapshot;
+}
+
+export async function loadRuntimeStateProjections(bookDir: string): Promise<RuntimeStateProjections> {
+  const snapshot = await loadRuntimeStateSnapshot(bookDir);
+  return {
+    currentStateMarkdown: renderCurrentStateProjection(snapshot.currentState, snapshot.manifest.language),
+    hooksMarkdown: renderHooksProjection(snapshot.hooks, snapshot.manifest.language, {
+      currentChapter: snapshot.currentState.chapter,
+    }),
+  };
 }
 
 export async function buildRuntimeStateArtifacts(params: {

@@ -2840,6 +2840,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   const state = new StateManager(root);
   let cachedConfig = initialConfig;
   const activeConfirmedTasks = new Map<string, AbortController>();
+  const stateRepairJobs = new Map<string, {
+    readonly bookId: string;
+    readonly chapterNumber: number;
+    readonly startedAt: number;
+    status: "running" | "completed" | "error";
+    completedAt?: number;
+    result?: Awaited<ReturnType<PipelineRunner["repairChapterState"]>>;
+    error?: string;
+  }>();
   // 确认式生产任务的单任务名额（sessionId → taskId）。原来的检查是"await 读快照
   // → 之后才 set controller"的 check-then-act：两个并发确认请求都能通过检查，
   // 双任务同时启动、快照互相覆盖。这里在任何 await 之前同步占位，占位失败的
@@ -3664,14 +3673,52 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     }
   });
 
+  app.get("/api/v1/books/:id/repair-state/:chapter", (c) => {
+    const id = c.req.param("id");
+    const chapterNum = parseInt(c.req.param("chapter"), 10);
+    const job = stateRepairJobs.get(`${id}\0${chapterNum}`);
+    if (!job) return c.json({ error: "State repair job not found" }, 404);
+    return c.json(job);
+  });
+
   app.post("/api/v1/books/:id/repair-state/:chapter", async (c) => {
     const id = c.req.param("id");
     const chapterNum = parseInt(c.req.param("chapter"), 10);
+    if (!Number.isSafeInteger(chapterNum) || chapterNum < 1) {
+      return c.json({ error: "Invalid chapter number" }, 400);
+    }
+    const jobKey = `${id}\0${chapterNum}`;
+    const activeJob = stateRepairJobs.get(jobKey);
+    if (activeJob?.status === "running") return c.json(activeJob, 202);
+
     try {
       const pipeline = new PipelineRunner(await buildPipelineConfig());
-      const result = await pipeline.repairChapterState(id, chapterNum);
-      broadcast("repair-state:complete", { bookId: id, chapter: chapterNum });
-      return c.json(result);
+      const job = {
+        bookId: id,
+        chapterNumber: chapterNum,
+        startedAt: Date.now(),
+        status: "running" as const,
+      };
+      stateRepairJobs.set(jobKey, job);
+      void pipeline.repairChapterState(id, chapterNum).then((result) => {
+        stateRepairJobs.set(jobKey, {
+          ...job,
+          status: "completed",
+          completedAt: Date.now(),
+          result,
+        });
+        broadcast("repair-state:complete", { bookId: id, chapter: chapterNum });
+      }).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        stateRepairJobs.set(jobKey, {
+          ...job,
+          status: "error",
+          completedAt: Date.now(),
+          error: message,
+        });
+        broadcast("repair-state:error", { bookId: id, chapter: chapterNum, error: message });
+      });
+      return c.json(job, 202);
     } catch (e) {
       broadcast("repair-state:error", { bookId: id, chapter: chapterNum, error: String(e) });
       return c.json({ error: String(e) }, 500);

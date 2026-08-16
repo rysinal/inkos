@@ -1,4 +1,5 @@
 import { fetchJson, useApi, postApi } from "../hooks/use-api";
+import { repairChapterState } from "../lib/state-repair";
 import { useEffect, useMemo, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
@@ -411,7 +412,7 @@ export function BookDetail({
 
   const handleRepairState = async (chapterNum: number) => {
     await runBookAction(`repair-state-${chapterNum}`, async () => {
-      await fetchJson(`/books/${bookId}/repair-state/${chapterNum}`, { method: "POST" });
+      await repairChapterState({ bookId, chapterNumber: chapterNum });
       return data?.book.language === "en" ? `Chapter ${chapterNum} state repaired.` : `第 ${chapterNum} 章状态已修复。`;
     });
   };

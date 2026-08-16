@@ -6417,8 +6417,17 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(composeChapterMock).toHaveBeenCalledWith("demo-book", "use the plan");
 
     const repairRes = await app.request("http://localhost/api/v1/books/demo-book/repair-state/3", { method: "POST" });
-    await expect(repairRes.json()).resolves.toMatchObject({ chapterNumber: 3, status: "ready-for-review" });
+    expect(repairRes.status).toBe(202);
+    await expect(repairRes.json()).resolves.toMatchObject({ status: "running", chapterNumber: 3 });
     expect(repairChapterStateMock).toHaveBeenCalledWith("demo-book", 3);
+
+    await vi.waitFor(async () => {
+      const repairStatus = await app.request("http://localhost/api/v1/books/demo-book/repair-state/3");
+      await expect(repairStatus.json()).resolves.toMatchObject({
+        status: "completed",
+        result: { chapterNumber: 3, status: "ready-for-review" },
+      });
+    });
 
     const reviseFoundationRes = await app.request("http://localhost/api/v1/books/demo-book/foundation/revise", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -6426,6 +6435,36 @@ describe("createStudioServer daemon lifecycle", () => {
     });
     await expect(reviseFoundationRes.json()).resolves.toMatchObject({ ok: true });
     expect(reviseFoundationMock).toHaveBeenCalledWith("demo-book", "make the protagonist colder");
+  });
+
+  it("accepts a long state repair immediately and deduplicates repeated starts", async () => {
+    let finishRepair!: (value: {
+      chapterNumber: number;
+      status: string;
+    }) => void;
+    repairChapterStateMock.mockReturnValue(new Promise((resolve) => {
+      finishRepair = resolve;
+    }));
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const first = await app.request("http://localhost/api/v1/books/demo-book/repair-state/3", { method: "POST" });
+    const second = await app.request("http://localhost/api/v1/books/demo-book/repair-state/3", { method: "POST" });
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect(repairChapterStateMock).toHaveBeenCalledTimes(1);
+
+    const running = await app.request("http://localhost/api/v1/books/demo-book/repair-state/3");
+    await expect(running.json()).resolves.toMatchObject({ status: "running", chapterNumber: 3 });
+
+    finishRepair({ chapterNumber: 3, status: "ready-for-review" });
+    await vi.waitFor(async () => {
+      const completed = await app.request("http://localhost/api/v1/books/demo-book/repair-state/3");
+      await expect(completed.json()).resolves.toMatchObject({
+        status: "completed",
+        result: { chapterNumber: 3, status: "ready-for-review" },
+      });
+    });
   });
 
   it("uploads an external motherbook and imports its extracted text as canon", async () => {

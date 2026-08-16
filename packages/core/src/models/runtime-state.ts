@@ -104,6 +104,19 @@ export const CurrentStatePatchSchema = z.object({
 
 export type CurrentStatePatch = z.infer<typeof CurrentStatePatchSchema>;
 
+export const StateFactUpsertSchema = z.object({
+  predicate: z.string().min(1),
+  object: z.string().min(1),
+  subject: z.string().min(1).optional(),
+});
+
+export const StateFactOpsSchema = z.object({
+  upsert: z.array(StateFactUpsertSchema).default([]),
+  remove: z.array(z.string().min(1)).default([]),
+});
+
+export type StateFactOps = z.infer<typeof StateFactOpsSchema>;
+
 export const HookOpsSchema = z.object({
   upsert: z.array(HookRecordSchema).default([]),
   mention: z.array(z.string().min(1)).default([]),
@@ -127,6 +140,7 @@ const LooseOpSchema = z.record(z.string(), z.unknown());
 export const RuntimeStateDeltaSchema = z.object({
   chapter: z.number().int().min(1),
   currentStatePatch: CurrentStatePatchSchema.optional(),
+  stateFactOps: StateFactOpsSchema.optional(),
   hookOps: HookOpsSchema.default({
     upsert: [],
     mention: [],

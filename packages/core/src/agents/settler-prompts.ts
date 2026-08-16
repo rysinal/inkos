@@ -106,6 +106,15 @@ function buildSettlerOutputFormat(gp: GenreProfile): string {
     "currentAlliances": "可选",
     "currentConflict": "可选"
   },
+  "stateFactOps": {
+    "upsert": [
+      {
+        "predicate": "样本状态",
+        "object": "用正文确认后的完整最新值替换旧值"
+      }
+    ],
+    "remove": ["正文已明确不再成立且无需替代值的旧字段名"]
+  },
   "hookOps": {
     "upsert": [
       {
@@ -156,7 +165,8 @@ function buildSettlerOutputFormat(gp: GenreProfile): string {
 5. 如果旧 hook 只是被提到、没有真实状态变化，把它放进 mention，不要更新 lastAdvancedChapter
 6. 如果本章推进了旧 hook，lastAdvancedChapter 必须等于当前章号
 7. 如果回收或延后 hook，必须放在 resolve / defer 数组里
-8. chapterSummary.chapter 必须等于当前章节号`;
+8. currentStatePatch 只更新六个固定字段；当前状态卡里的其他命名字段必须通过 stateFactOps.upsert 按原 predicate 更新，不能留下与正文冲突的旧值
+9. chapterSummary.chapter 必须等于当前章节号`;
 }
 
 export function buildSettlerUserPrompt(params: {

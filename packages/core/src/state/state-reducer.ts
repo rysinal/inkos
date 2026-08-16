@@ -6,6 +6,7 @@ import {
   StateManifestSchema,
   type HookRecord,
   type ChapterSummariesState,
+  type CurrentStatePatch,
   type CurrentStateState,
   type HooksState,
   type RuntimeStateDelta,
@@ -195,55 +196,11 @@ function applyCurrentStatePatch(
   language: "zh" | "en",
   delta: RuntimeStateDelta,
 ): CurrentStateState {
-  if (!delta.currentStatePatch) {
-    return {
-      chapter: delta.chapter,
-      facts: [...currentState.facts],
-    };
-  }
-
   const nextFacts = [...currentState.facts];
-  const labels = language === "en"
-    ? {
-      currentLocation: ["Current Location", "当前位置"],
-      protagonistState: ["Protagonist State", "主角状态"],
-      currentGoal: ["Current Goal", "当前目标"],
-      currentConstraint: ["Current Constraint", "当前限制"],
-      currentAlliances: ["Current Alliances", "Current Relationships", "当前敌我"],
-      currentConflict: ["Current Conflict", "当前冲突"],
-    }
-    : {
-      currentLocation: ["当前位置", "Current Location"],
-      protagonistState: ["主角状态", "Protagonist State"],
-      currentGoal: ["当前目标", "Current Goal"],
-      currentConstraint: ["当前限制", "Current Constraint"],
-      currentAlliances: ["当前敌我", "Current Alliances", "Current Relationships"],
-      currentConflict: ["当前冲突", "Current Conflict"],
-    };
-
-  for (const [patchKey, aliases] of Object.entries(labels) as Array<[
-    keyof typeof labels,
-    string[],
-  ]>) {
-    const value = delta.currentStatePatch[patchKey];
-    if (value === undefined) continue;
-
-    for (let index = nextFacts.length - 1; index >= 0; index -= 1) {
-      const predicate = nextFacts[index]?.predicate ?? "";
-      if (aliases.some((alias) => alias.toLowerCase() === predicate.toLowerCase())) {
-        nextFacts.splice(index, 1);
-      }
-    }
-
-    nextFacts.push({
-      subject: "protagonist",
-      predicate: aliases[0]!,
-      object: value,
-      validFromChapter: delta.chapter,
-      validUntilChapter: null,
-      sourceChapter: delta.chapter,
-    });
+  if (delta.currentStatePatch) {
+    applyStandardStatePatch(nextFacts, delta.currentStatePatch, language, delta.chapter);
   }
+  applyNamedStateFactOps(nextFacts, delta);
 
   return {
     chapter: delta.chapter,
@@ -252,6 +209,81 @@ function applyCurrentStatePatch(
       || left.object.localeCompare(right.object)
     )),
   };
+}
+
+function applyStandardStatePatch(
+  facts: CurrentStateState["facts"][number][],
+  patch: CurrentStatePatch,
+  language: "zh" | "en",
+  chapter: number,
+): void {
+  const labels = statePatchLabels(language);
+  for (const [patchKey, aliases] of Object.entries(labels) as Array<[keyof CurrentStatePatch, string[]]>) {
+    const value = patch[patchKey];
+    if (value === undefined) continue;
+    for (let index = facts.length - 1; index >= 0; index -= 1) {
+      const predicate = facts[index]?.predicate ?? "";
+      if (aliases.some((alias) => alias.toLowerCase() === predicate.toLowerCase())) facts.splice(index, 1);
+    }
+    facts.push({
+      subject: "protagonist",
+      predicate: aliases[0]!,
+      object: value,
+      validFromChapter: chapter,
+      validUntilChapter: null,
+      sourceChapter: chapter,
+    });
+  }
+}
+
+function statePatchLabels(language: "zh" | "en"): Record<keyof CurrentStatePatch, string[]> {
+  return language === "en" ? {
+    currentLocation: ["Current Location", "当前位置"],
+    protagonistState: ["Protagonist State", "主角状态"],
+    currentGoal: ["Current Goal", "当前目标"],
+    currentConstraint: ["Current Constraint", "当前限制"],
+    currentAlliances: ["Current Alliances", "Current Relationships", "当前敌我"],
+    currentConflict: ["Current Conflict", "当前冲突"],
+  } : {
+    currentLocation: ["当前位置", "Current Location"],
+    protagonistState: ["主角状态", "Protagonist State"],
+    currentGoal: ["当前目标", "Current Goal"],
+    currentConstraint: ["当前限制", "Current Constraint"],
+    currentAlliances: ["当前敌我", "Current Alliances", "Current Relationships"],
+    currentConflict: ["当前冲突", "Current Conflict"],
+  };
+}
+
+function applyNamedStateFactOps(
+  facts: CurrentStateState["facts"][number][],
+  delta: RuntimeStateDelta,
+): void {
+  const operations = delta.stateFactOps;
+  if (!operations) return;
+  const removals = new Set(operations.remove.map(normalizeStatePredicate));
+  const upserts = new Map(
+    operations.upsert.map((fact) => [normalizeStatePredicate(fact.predicate), fact]),
+  );
+
+  for (let index = facts.length - 1; index >= 0; index -= 1) {
+    const predicate = normalizeStatePredicate(facts[index]?.predicate ?? "");
+    if (removals.has(predicate) || upserts.has(predicate)) facts.splice(index, 1);
+  }
+
+  for (const fact of upserts.values()) {
+    facts.push({
+      subject: fact.subject ?? "current_state",
+      predicate: fact.predicate.trim(),
+      object: fact.object.trim(),
+      validFromChapter: delta.chapter,
+      validUntilChapter: null,
+      sourceChapter: delta.chapter,
+    });
+  }
+}
+
+function normalizeStatePredicate(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function applySummaryDelta(

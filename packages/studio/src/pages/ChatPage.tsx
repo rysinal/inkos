@@ -3,6 +3,7 @@ import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
 import { fetchJson, postApi, useApi } from "../hooks/use-api";
+import { repairChapterState } from "../lib/state-repair";
 import type { ChatAttachmentPayload, MessagePart } from "../store/chat/types";
 import { chatSelectors, useChatStore } from "../store/chat";
 import type { ChatSessionKind } from "../store/chat";
@@ -20,7 +21,7 @@ import {
 } from "../components/ai-elements/reasoning";
 import { ChatMessage } from "../components/chat/ChatMessage";
 import { QuickActions } from "../components/chat/QuickActions";
-import { ToolExecutionSteps, type ProposedActionDetails } from "../components/chat/ToolExecutionSteps";
+import { ToolExecutionSteps, type ProposedActionDetails, type StateRepairDetails } from "../components/chat/ToolExecutionSteps";
 import {
   buildNarrativeForecastRecheckInstruction,
   buildNarrativeForecastSelectionInstruction,
@@ -399,6 +400,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
   const loadSessionDetail = useChatStore((s) => s.loadSessionDetail);
   const activateSession = useChatStore((s) => s.activateSession);
   const setSessionPlayMode = useChatStore((s) => s.setSessionPlayMode);
+  const bumpBookDataVersion = useChatStore((s) => s.bumpBookDataVersion);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollFrameRef = useRef<ScrollFrameId | null>(null);
@@ -816,6 +818,24 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     );
   };
 
+  const handleRepairState = async (details: StateRepairDetails) => {
+    if (activeBookId && details.bookId !== activeBookId) {
+      throw new Error(isZh ? "修复目标与当前书籍不一致。" : "The repair target does not match the active book.");
+    }
+    const bookPath = encodeURIComponent(details.bookId);
+    const current = await fetchJson<{
+      chapters: ReadonlyArray<{ readonly number: number; readonly status: string }>;
+    }>(`/books/${bookPath}`);
+    const chapter = current.chapters.find((item) => item.number === details.chapterNumber);
+    if (!chapter) {
+      throw new Error(isZh ? `找不到第 ${details.chapterNumber} 章。` : `Chapter ${details.chapterNumber} was not found.`);
+    }
+    if (chapter.status === "state-degraded") {
+      await repairChapterState(details);
+    }
+    bumpBookDataVersion();
+  };
+
   useEffect(() => { setPlayImageError(null); }, [activeSessionId]);
 
   useEffect(() => {
@@ -982,6 +1002,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
                               onOpenFilmStudio={nav.toFilmStudio}
                               onSelectNarrativeBranch={handleSelectNarrativeBranch}
                               onRecheckNarrativeForecast={handleRecheckNarrativeForecast}
+                              onRepairState={handleRepairState}
                             />
                           );
                         }

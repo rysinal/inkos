@@ -37,7 +37,11 @@ import {
 } from "../utils/governed-working-set.js";
 import { extractPOVFromOutline, filterMatrixByPOV, filterHooksByPOV } from "../utils/pov-filter.js";
 import { parseCreativeOutput } from "./writer-parser.js";
-import { buildRuntimeStateArtifacts, type RuntimeStateArtifacts } from "../state/runtime-state-store.js";
+import {
+  buildRuntimeStateArtifacts,
+  loadRuntimeStateProjections,
+  type RuntimeStateArtifacts,
+} from "../state/runtime-state-store.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
@@ -131,6 +135,52 @@ export interface WriteChapterOutput {
     readonly suggestion: string;
   }>;
   readonly tokenUsage?: TokenUsage;
+}
+
+function hasCompleteLegacySettlement(settlement: ReturnType<typeof parseSettlementOutput>): boolean {
+  return settlement.updatedState !== "(状态卡未更新)"
+    && settlement.updatedHooks !== "(伏笔池未更新)";
+}
+
+function mergeGovernedLegacySettlement(
+  params: {
+    readonly originalHooks: string;
+    readonly originalSubplots: string;
+    readonly originalEmotionalArcs: string;
+    readonly originalCharacterMatrix: string;
+  },
+  settlement: ReturnType<typeof parseSettlementOutput>,
+): ReturnType<typeof parseSettlementOutput> {
+  return {
+    ...settlement,
+    updatedHooks: mergeTableMarkdownByKey(params.originalHooks, settlement.updatedHooks, [0]),
+    updatedSubplots: settlement.updatedSubplots
+      ? mergeTableMarkdownByKey(params.originalSubplots, settlement.updatedSubplots, [0])
+      : settlement.updatedSubplots,
+    updatedEmotionalArcs: settlement.updatedEmotionalArcs
+      ? mergeTableMarkdownByKey(params.originalEmotionalArcs, settlement.updatedEmotionalArcs, [0, 1])
+      : settlement.updatedEmotionalArcs,
+    updatedCharacterMatrix: settlement.updatedCharacterMatrix
+      ? mergeCharacterMatrixMarkdown(params.originalCharacterMatrix, settlement.updatedCharacterMatrix)
+      : settlement.updatedCharacterMatrix,
+  };
+}
+
+function buildSettlementFormatRetryPrompt(settlerUser: string): string {
+  return `${settlerUser}
+
+## 格式纠正
+
+上一份结算响应无法解析。请重新完成同一次结算，只输出 === POST_SETTLEMENT === 和 === RUNTIME_STATE_DELTA ===。
+RUNTIME_STATE_DELTA 必须是严格有效的 JSON；不要输出 UPDATED_STATE、UPDATED_HOOKS 等旧格式标签，也不要省略现有伏笔的真实推进。`;
+}
+
+function addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
+  return {
+    promptTokens: left.promptTokens + right.promptTokens,
+    completionTokens: left.completionTokens + right.completionTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+  };
 }
 
 export class WriterAgent extends BaseAgent {
@@ -456,15 +506,17 @@ export class WriterAgent extends BaseAgent {
 
   async settleChapterState(input: SettleChapterStateInput): Promise<WriteChapterOutput> {
     const [
-      currentState,
+      runtimeState,
+      legacyCurrentState,
       ledger,
-      hooks,
+      legacyHooks,
       chapterSummaries,
       subplotBoard,
       emotionalArcs,
       characterMatrix,
       volumeOutline,
     ] = await Promise.all([
+      loadRuntimeStateProjections(input.bookDir).catch(() => null),
       // Phase 5 consolidation fallback: derive initial state when only seed on disk.
       readCurrentStateWithFallback(input.bookDir, "(文件尚未创建)"),
       this.readFileOrDefault(join(input.bookDir, "story/particle_ledger.md")),
@@ -475,6 +527,8 @@ export class WriterAgent extends BaseAgent {
       readCharacterContext(input.bookDir, "(文件尚未创建)"),
       readVolumeMap(input.bookDir, "(文件尚未创建)"),
     ]);
+    const currentState = runtimeState?.currentStateMarkdown ?? legacyCurrentState;
+    const hooks = runtimeState?.hooksMarkdown ?? legacyHooks;
 
     const { profile: genreProfile } = await readGenreProfile(this.ctx.projectRoot, input.book.genre);
     const parsedBookRules = await readBookRules(input.bookDir);
@@ -640,13 +694,14 @@ export class WriterAgent extends BaseAgent {
       validationFeedback: params.validationFeedback,
     });
 
-    const response = await this.chat(
+    let response = await this.chat(
       [
         { role: "system", content: settlerSystem },
         { role: "user", content: settlerUser },
       ],
       { temperature: 0.3 },
     );
+    let usage = response.usage;
 
     let mergedSettlement: ReturnType<typeof parseSettlementOutput> & {
       runtimeStateDelta?: RuntimeStateDelta;
@@ -667,26 +722,41 @@ export class WriterAgent extends BaseAgent {
       };
     } catch {
       const settlement = parseSettlementOutput(response.content, params.genreProfile);
-      mergedSettlement = governedControlBlock
-        ? {
-            ...settlement,
-            updatedHooks: mergeTableMarkdownByKey(params.originalHooks, settlement.updatedHooks, [0]),
-            updatedSubplots: settlement.updatedSubplots
-              ? mergeTableMarkdownByKey(params.originalSubplots, settlement.updatedSubplots, [0])
-              : settlement.updatedSubplots,
-            updatedEmotionalArcs: settlement.updatedEmotionalArcs
-              ? mergeTableMarkdownByKey(params.originalEmotionalArcs, settlement.updatedEmotionalArcs, [0, 1])
-              : settlement.updatedEmotionalArcs,
-            updatedCharacterMatrix: settlement.updatedCharacterMatrix
-              ? mergeCharacterMatrixMarkdown(params.originalCharacterMatrix, settlement.updatedCharacterMatrix)
-              : settlement.updatedCharacterMatrix,
-          }
-        : settlement;
+      if (hasCompleteLegacySettlement(settlement)) {
+        mergedSettlement = governedControlBlock
+          ? mergeGovernedLegacySettlement(params, settlement)
+          : settlement;
+      } else {
+        this.logWarn(resolvedLang, {
+          zh: "状态结算格式无效，正在仅重试结算格式",
+          en: "State settlement format is invalid; retrying settlement formatting only",
+        });
+        response = await this.chat(
+          [
+            { role: "system", content: settlerSystem },
+            { role: "user", content: buildSettlementFormatRetryPrompt(settlerUser) },
+          ],
+          { temperature: 0.1 },
+        );
+        usage = addTokenUsage(usage, response.usage);
+        const corrected = parseSettlerDeltaOutput(response.content);
+        mergedSettlement = {
+          postSettlement: corrected.postSettlement,
+          runtimeStateDelta: corrected.runtimeStateDelta,
+          updatedState: "",
+          updatedLedger: "",
+          updatedHooks: "",
+          chapterSummary: "",
+          updatedSubplots: "",
+          updatedEmotionalArcs: "",
+          updatedCharacterMatrix: "",
+        };
+      }
     }
 
     return {
       settlement: mergedSettlement,
-      usage: response.usage,
+      usage,
     };
   }
 
