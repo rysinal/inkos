@@ -186,6 +186,113 @@ describe("chat message actions", () => {
     ]);
   });
 
+  it("keeps the task card and SSE open after the agent accepts background work", async () => {
+    const store = createTestStore();
+    const sessionId = store.getState().createDraftSession("demo-book", "book");
+    store.getState().setSelectedModel("deepseek-v4-flash", "kkaiapi");
+    fetchJson
+      .mockResolvedValueOnce({ session: { sessionId, bookId: "demo-book", sessionKind: "book" } })
+      .mockResolvedValueOnce({
+        accepted: true,
+        response: "",
+        task: {
+          version: 1,
+          sessionId,
+          requestedIntent: "write_next",
+          updatedAt: 20,
+          execution: {
+            id: "direct-write_next-1",
+            tool: "sub_agent",
+            agent: "writer",
+            label: "写作",
+            status: "running",
+            startedAt: 10,
+          },
+        },
+        session: { sessionId, activeBookId: "demo-book", sessionKind: "book" },
+      });
+
+    await store.getState().sendMessage(sessionId, "继续写下一章", {
+      activeBookId: "demo-book",
+      sessionKind: "book",
+      actionSource: "button",
+      requestedIntent: "write_next",
+    });
+
+    const runtime = store.getState().sessions[sessionId];
+    expect(runtime).toMatchObject({ isStreaming: true, isChatStreaming: false });
+    expect(runtime?.stream).toBe(fakeEventSources[0]);
+    expect(fakeEventSources[0]?.closed).toBe(false);
+    expect(
+      (runtime?.messages ?? []).flatMap((message) => message.toolExecutions ?? []),
+    ).toEqual([
+      expect.objectContaining({ id: "direct-write_next-1", status: "running" }),
+    ]);
+    expect((runtime?.messages ?? []).some((message) => message.content.includes("模型未返回文本内容"))).toBe(false);
+  });
+
+  it("does not revive a task that SSE completed before the accepted response arrived", async () => {
+    const store = createTestStore();
+    const sessionId = store.getState().createDraftSession("demo-book", "book");
+    store.getState().setSelectedModel("deepseek-v4-flash", "kkaiapi");
+    let resolveAgent!: (value: unknown) => void;
+    fetchJson
+      .mockResolvedValueOnce({ session: { sessionId, bookId: "demo-book", sessionKind: "book" } })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveAgent = resolve;
+      }));
+
+    const sent = store.getState().sendMessage(sessionId, "继续写下一章", {
+      activeBookId: "demo-book",
+      sessionKind: "book",
+      actionSource: "button",
+      requestedIntent: "write_next",
+    });
+    await vi.waitFor(() => expect(fakeEventSources).toHaveLength(1));
+    fakeEventSources[0]?.emit("tool:start", {
+      sessionId,
+      id: "direct-write_next-fast",
+      tool: "sub_agent",
+      args: { agent: "writer" },
+      background: true,
+    });
+    fakeEventSources[0]?.emit("tool:end", {
+      sessionId,
+      id: "direct-write_next-fast",
+      tool: "sub_agent",
+      result: { content: [{ type: "text", text: "第 3 章已完成" }] },
+    });
+    fakeEventSources[0]?.emit("agent:complete", { sessionId });
+
+    resolveAgent({
+      accepted: true,
+      response: "",
+      task: {
+        version: 1,
+        sessionId,
+        requestedIntent: "write_next",
+        updatedAt: 20,
+        execution: {
+          id: "direct-write_next-fast",
+          tool: "sub_agent",
+          agent: "writer",
+          label: "写作",
+          status: "running",
+          startedAt: 10,
+        },
+      },
+      session: { sessionId, activeBookId: "demo-book", sessionKind: "book" },
+    });
+    await sent;
+
+    const runtime = store.getState().sessions[sessionId];
+    expect(
+      (runtime?.messages ?? []).flatMap((message) => message.toolExecutions ?? []),
+    ).toEqual([expect.objectContaining({ id: "direct-write_next-fast", status: "completed" })]);
+    expect(runtime).toMatchObject({ isStreaming: false, isChatStreaming: false, stream: null });
+    expect(fakeEventSources[0]?.closed).toBe(true);
+  });
+
   it("restores confirmed proposal cards when loading persisted session messages", () => {
     const store = createTestStore();
     const sessionId = store.getState().createDraftSession(null, "play", "open");

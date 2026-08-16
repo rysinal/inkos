@@ -1297,13 +1297,16 @@ function validateAgentActionExecution(args: {
   return undefined;
 }
 
-type AgentFailureKind = "busy" | "llm" | "internal" | "unknown";
+type AgentFailureKind = "busy" | "conflict" | "llm" | "internal" | "unknown";
 
 function classifyAgentFailure(message: string): AgentFailureKind {
   const text = message.trim();
   if (!text) return "unknown";
   if (/BookWriteLockError|locked by an active InkOS write|BOOK_BUSY/i.test(text)) {
     return "busy";
+  }
+  if (/Latest chapter \d+ is state-degraded|Repair state or rewrite that chapter before continuing|No chapters to export/i.test(text)) {
+    return "conflict";
   }
   if (
     /API\s*返回|上游|upstream|Bad Gateway|temporarily unavailable|rate limit|quota|API Key|unauthorized|forbidden|无法连接到 API|fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|LLM returned empty response|Provider finish_reason|reasoning_content/i.test(text)
@@ -1326,6 +1329,9 @@ function formatAgentFailure(
   if (kind === "busy") {
     return { code: "BOOK_BUSY", message, status: 409 };
   }
+  if (kind === "conflict") {
+    return { code: "AGENT_ACTION_CONFLICT", message, status: 409 };
+  }
   if (kind === "llm") {
     return { code: "AGENT_LLM_ERROR", message, status: 502 };
   }
@@ -1337,16 +1343,6 @@ function formatAgentFailure(
     };
   }
   return { code: "AGENT_ERROR", message, status: 500 };
-}
-
-function formatAgentActionFailure(
-  message: string,
-  lang: StudioLanguage,
-): { readonly code: string; readonly message: string; readonly status: 409 | 502 } {
-  const failure = formatAgentFailure(message, lang);
-  return failure.code === "BOOK_BUSY"
-    ? { code: failure.code, message: failure.message, status: 409 }
-    : { code: "AGENT_ACTION_FAILED", message, status: 502 };
 }
 
 interface CollectedToolExec {
@@ -1903,6 +1899,7 @@ interface StudioBookListSummary {
 
 type EventHandler = (event: string, data: unknown) => void;
 const subscribers = new Set<EventHandler>();
+const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?: string }>();
 
 // 内存缓存：service -> 模型列表 + 更新时间戳；避免每次 sidebar 挂载时都打真实 LLM /models
@@ -2875,8 +2872,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     requestedIntent: RequestedIntent,
     exec: CollectedToolExec,
     sourceRequestId?: string,
-  ): Promise<void> => {
-    if (deletedSessionIds.has(sessionId)) return;
+  ): Promise<StudioTaskSnapshot> => {
     const snapshot: StudioTaskSnapshot = {
       version: 1,
       sessionId,
@@ -2889,7 +2885,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         ...(exec.logs ? { logs: [...exec.logs] } : {}),
       },
     };
-    await saveStudioTaskSnapshot(root, snapshot);
+    if (!deletedSessionIds.has(sessionId)) {
+      await saveStudioTaskSnapshot(root, snapshot);
+    }
+    return snapshot;
   };
 
   const loadReconciledTaskSnapshot = async (sessionId: string): Promise<StudioTaskSnapshot | null> => {
@@ -3755,7 +3754,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       // Keep alive
       const keepAlive = setInterval(() => {
         stream.writeSSE({ event: "ping", data: "" });
-      }, 30000);
+      }, SSE_HEARTBEAT_INTERVAL_MS);
 
       stream.onAbort(() => {
         subscribers.delete(handler);
@@ -5216,133 +5215,145 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         const taskController = new AbortController();
         activeConfirmedTasks.set(taskId, taskController);
         let pendingBookId: string | null = null;
-        try {
-          // 预留成功后再走快照检查：本进程的任务都会占预留名额，这里防的是
-          // 旧进程遗留的运行中快照（loadReconciledTaskSnapshot 会把它对账成
-          // 终态）等边界情况，保证不覆盖一个仍被认为在运行的任务。
-          const runningTask = await findActiveRunningTask(bookSession.sessionId);
-          if (runningTask) {
-            return productionTaskBusyResponse();
-          }
+        const runningTask = await findActiveRunningTask(bookSession.sessionId);
+        if (runningTask) {
+          activeConfirmedTasks.delete(taskId);
+          reservedProductionSessions.delete(reservedSessionId);
+          return productionTaskBusyResponse();
+        }
 
-          pendingBookId = confirmedIntent === "create_book" && actionPayload?.createBook?.title
-            ? deriveBookIdFromTitle(actionPayload.createBook.title)
-            : null;
-          if (pendingBookId) {
-            bookCreateStatus.set(pendingBookId, { status: "creating" });
-            broadcast("book:creating", {
-              bookId: pendingBookId,
-              title: actionPayload?.createBook?.title ?? pendingBookId,
-              sessionId: streamSessionId,
-            });
-          }
-
-          // 任务开始前先把用户指令作为 user 消息写进 transcript：任务运行期间
-          // 刷新页面时，用户气泡能从 transcript 恢复；并行聊天随后写入的消息
-          // 也会按真实时间排在指令之后。完成/失败路径只追加助手工具消息
-          //（instruction 传空字符串），指令不会写第二遍。
-          await appendSessionMessagesUnlessDeleted(root, bookSession.sessionId, [{
-            role: "user",
-            content: instruction,
-            timestamp: Date.now(),
-          }], instruction, { sessionKind });
-
-          const exec = await executeConfirmedProductionAction({
-            pipeline,
-            root,
-            sessionId: bookSession.sessionId,
-            bookId: agentBookId,
-            streamSessionId,
-            instruction,
-            requestedIntent: confirmedIntent,
-            actionPayload,
-            language: surfaceLanguage,
-            taskId,
-            sourceRequestId,
-            signal: taskController.signal,
-            onTaskChange: (taskExec) => persistConfirmedTask(
-              bookSession.sessionId,
-              confirmedIntent,
-              taskExec,
-              sourceRequestId,
-            ),
-            ...(playMode ? { playMode } : {}),
+        pendingBookId = confirmedIntent === "create_book" && actionPayload?.createBook?.title
+          ? deriveBookIdFromTitle(actionPayload.createBook.title)
+          : null;
+        if (pendingBookId) {
+          bookCreateStatus.set(pendingBookId, { status: "creating" });
+          broadcast("book:creating", {
+            bookId: pendingBookId,
+            title: actionPayload?.createBook?.title ?? pendingBookId,
+            sessionId: streamSessionId,
           });
+        }
 
-          let createdBookId: string | null = null;
-          if (exec.tool === "sub_agent" && exec.agent === "architect" && exec.status === "completed") {
-            createdBookId = resolveCreatedBookIdFromToolExecs([exec]);
-            if (createdBookId) {
-              try {
-                const migratedSession = await migrateBookSession(root, bookSession.sessionId, createdBookId);
-                if (migratedSession) {
-                  bookSession = migratedSession;
-                }
-              } catch (e) {
-                if (!(e instanceof SessionAlreadyMigratedError)) {
-                  throw e;
-                }
-              }
-              const book = await loadStudioBookListSummary(state, createdBookId).catch(() => undefined);
-              bookCreateStatus.delete(createdBookId);
-              broadcast("book:created", {
-                bookId: createdBookId,
-                sessionId: bookSession.sessionId,
-                ...(book ? { book } : {}),
-              });
-            }
-          }
+        let resolveTaskStart!: (value: { task?: StudioTaskSnapshot; error?: unknown }) => void;
+        let taskStartSettled = false;
+        const taskStart = new Promise<{ task?: StudioTaskSnapshot; error?: unknown }>((resolve) => {
+          resolveTaskStart = resolve;
+        });
+        const settleTaskStart = (value: { task?: StudioTaskSnapshot; error?: unknown }) => {
+          if (taskStartSettled) return;
+          taskStartSettled = true;
+          resolveTaskStart(value);
+        };
 
-          const responseText = exec.result ?? pick(surfaceLanguage, "已完成。", "Done.");
-          const responseForUser = suppressManualTextForTool(exec) ? "" : responseText;
-          // 指令已在任务开始时写入 transcript，这里只补助手工具消息。
-          await appendSessionMessagesUnlessDeleted(root, bookSession.sessionId, [
-            manualToolAssistantMessage(
-              responseText,
-              exec,
-              configuredEntry?.service ?? reqService ?? config.llm.provider,
-              reqModel ?? config.llm.model,
-            ),
-          ], "", manualToolAppendOptions(sessionKind, exec));
-          await refreshBookSessionFromTranscript();
-          broadcast("agent:complete", { instruction, activeBookId: createdBookId ?? agentBookId, sessionId: bookSession.sessionId, sessionKind });
-          return c.json({
-            response: responseForUser,
-            details: { toolExecutions: [exec] },
-            session: {
+        const runConfirmedTask = async () => {
+          try {
+            await appendSessionMessagesUnlessDeleted(root, bookSession.sessionId, [{
+              role: "user",
+              content: instruction,
+              timestamp: Date.now(),
+            }], instruction, { sessionKind });
+
+            const exec = await executeConfirmedProductionAction({
+              pipeline,
+              root,
               sessionId: bookSession.sessionId,
-              sessionKind,
-              ...(createdBookId ?? agentBookId ? { activeBookId: createdBookId ?? agentBookId } : {}),
-            },
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const failure = formatAgentActionFailure(message, surfaceLanguage);
-          if (pendingBookId) {
-            bookCreateStatus.set(pendingBookId, { status: "error", error: message });
-            broadcast("book:error", { bookId: pendingBookId, sessionId: streamSessionId, error: message });
-          }
-          if (error instanceof ConfirmedActionExecutionError) {
-            // 指令已在任务开始时写入 transcript，失败时同样只补助手工具消息。
+              bookId: agentBookId,
+              streamSessionId,
+              instruction,
+              requestedIntent: confirmedIntent,
+              actionPayload,
+              language: surfaceLanguage,
+              taskId,
+              sourceRequestId,
+              signal: taskController.signal,
+              onTaskChange: async (taskExec) => {
+                const task = await persistConfirmedTask(
+                  bookSession.sessionId,
+                  confirmedIntent,
+                  taskExec,
+                  sourceRequestId,
+                );
+                settleTaskStart({ task });
+              },
+              ...(playMode ? { playMode } : {}),
+            });
+
+            let createdBookId: string | null = null;
+            if (exec.tool === "sub_agent" && exec.agent === "architect" && exec.status === "completed") {
+              createdBookId = resolveCreatedBookIdFromToolExecs([exec]);
+              if (createdBookId) {
+                try {
+                  const migratedSession = await migrateBookSession(root, bookSession.sessionId, createdBookId);
+                  if (migratedSession) bookSession = migratedSession;
+                } catch (e) {
+                  if (!(e instanceof SessionAlreadyMigratedError)) throw e;
+                }
+                const book = await loadStudioBookListSummary(state, createdBookId).catch(() => undefined);
+                bookCreateStatus.delete(createdBookId);
+                broadcast("book:created", {
+                  bookId: createdBookId,
+                  sessionId: bookSession.sessionId,
+                  ...(book ? { book } : {}),
+                });
+              }
+            }
+
+            const responseText = exec.result ?? pick(surfaceLanguage, "已完成。", "Done.");
             await appendSessionMessagesUnlessDeleted(root, bookSession.sessionId, [
               manualToolAssistantMessage(
-                message,
-                error.exec,
+                responseText,
+                exec,
                 configuredEntry?.service ?? reqService ?? config.llm.provider,
                 reqModel ?? config.llm.model,
               ),
-            ], "", manualToolAppendOptions(sessionKind, error.exec)).catch(() => undefined);
-            await refreshBookSessionFromTranscript().catch(() => undefined);
+            ], "", manualToolAppendOptions(sessionKind, exec));
+            await refreshBookSessionFromTranscript();
+            broadcast("agent:complete", { instruction, activeBookId: createdBookId ?? agentBookId, sessionId: bookSession.sessionId, sessionKind });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            settleTaskStart({ error });
+            if (pendingBookId) {
+              bookCreateStatus.set(pendingBookId, { status: "error", error: message });
+              broadcast("book:error", { bookId: pendingBookId, sessionId: streamSessionId, error: message });
+            }
+            if (error instanceof ConfirmedActionExecutionError) {
+              await appendSessionMessagesUnlessDeleted(root, bookSession.sessionId, [
+                manualToolAssistantMessage(
+                  message,
+                  error.exec,
+                  configuredEntry?.service ?? reqService ?? config.llm.provider,
+                  reqModel ?? config.llm.model,
+                ),
+              ], "", manualToolAppendOptions(sessionKind, error.exec)).catch(() => undefined);
+              await refreshBookSessionFromTranscript().catch(() => undefined);
+            }
+            broadcast("agent:error", { instruction, activeBookId: agentBookId, sessionId: bookSession.sessionId, sessionKind, error: message });
+          } finally {
+            activeConfirmedTasks.delete(taskId);
+            reservedProductionSessions.delete(reservedSessionId);
           }
-          broadcast("agent:error", { instruction, activeBookId: agentBookId, sessionId: bookSession.sessionId, sessionKind, error: message });
+        };
+
+        void runConfirmedTask();
+        const started = await taskStart;
+        if (!started.task) {
+          const message = started.error instanceof Error ? started.error.message : String(started.error);
+          const failure = formatAgentFailure(message, surfaceLanguage);
           return c.json({
             error: { code: failure.code, message: failure.message },
             response: failure.message,
           }, failure.status);
-        } finally {
-          activeConfirmedTasks.delete(taskId);
-          reservedProductionSessions.delete(reservedSessionId);
         }
+        return c.json({
+          accepted: true,
+          response: "",
+          task: started.task,
+          session: {
+            sessionId: bookSession.sessionId,
+            sessionKind,
+            ...(agentBookId ? { activeBookId: agentBookId } : {}),
+          },
+        }, 202);
       }
 
       // The surface agent should speak the user's language, not just the project default.

@@ -243,23 +243,30 @@ export function mergeTaskExecution(
     : { ...taskExecution, background: true };
   let found = false;
   const next = messages.map((message) => {
-    const hasDirectExecution = message.toolExecutions?.some((item) => item.id === execution.id) ?? false;
-    const hasPartExecution = message.parts?.some(
+    const directExecution = message.toolExecutions?.find((item) => item.id === execution.id);
+    const partExecution = message.parts?.find(
       (part) => part.type === "tool" && part.execution.id === execution.id,
-    ) ?? false;
+    );
+    const hasDirectExecution = Boolean(directExecution);
+    const hasPartExecution = partExecution?.type === "tool";
     if (!hasDirectExecution && !hasPartExecution) return message;
 
     found = true;
+    const currentExecution = directExecution ?? (partExecution?.type === "tool" ? partExecution.execution : undefined);
+    const currentIsTerminal = currentExecution?.status === "completed" || currentExecution?.status === "error";
+    const incomingIsRunning = execution.status === "running" || execution.status === "processing";
+    const preferred = currentIsTerminal && incomingIsRunning ? currentExecution : execution;
+    const replacement = preferred.background ? preferred : { ...preferred, background: true };
     const toolExecutions = hasDirectExecution
-      ? message.toolExecutions?.map((item) => item.id === execution.id ? execution : item)
-      : [...(message.toolExecutions ?? []), execution];
+      ? message.toolExecutions?.map((item) => item.id === execution.id ? replacement : item)
+      : [...(message.toolExecutions ?? []), replacement];
     const parts = hasPartExecution
       ? message.parts?.map((part) => (
           part.type === "tool" && part.execution.id === execution.id
-            ? { type: "tool" as const, execution }
+            ? { type: "tool" as const, execution: replacement }
             : part
         ))
-      : [...(message.parts ?? []), { type: "tool" as const, execution }];
+      : [...(message.parts ?? []), { type: "tool" as const, execution: replacement }];
     return { ...message, toolExecutions, parts };
   });
 

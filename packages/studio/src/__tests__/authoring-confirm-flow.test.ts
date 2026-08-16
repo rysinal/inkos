@@ -65,7 +65,12 @@ describe("interactive-film-authoring confirm flow (stubbed LLM)", () => {
         sessionId,
       }),
     });
-    expect(confirm.status).toBe(200);
+    expect(confirm.status).toBe(202);
+    await expect.poll(async () => {
+      const response = await app.request(`/api/v1/sessions/${sessionId}`);
+      const body = await response.json() as { task?: { execution?: { status?: string } } };
+      return body.task?.execution?.status;
+    }).toBe("completed");
 
     // Assert the story graph was created with at least 4 nodes
     const graph = await loadStoryGraph(root, bookId);

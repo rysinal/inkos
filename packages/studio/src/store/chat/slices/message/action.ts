@@ -602,6 +602,15 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           };
         });
       }
+      if (data.accepted && data.task) {
+        set((state) => ({
+          sessions: updateSession(state.sessions, sessionId, (runtime) => ({
+            isStreaming: true,
+            isChatStreaming: false,
+            messages: mergeTaskExecution(runtime.messages, data.task!.execution),
+          })),
+        }));
+      }
       const hasStream = Boolean(
         get().sessions[sessionId]?.messages.some((message) => message.timestamp === streamTs),
       );
@@ -648,6 +657,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
             })),
           }));
         }
+      } else if (data.accepted && data.task) {
+        // Production work continues through SSE and the persisted task snapshot.
       } else if (responseToolExecutions.length > 0) {
         if (hasStream) {
           get().finalizeStream(sessionId, streamTs, "", toolCall);

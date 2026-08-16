@@ -75,6 +75,7 @@ export interface SessionSummary {
 }
 
 export interface AgentResponse {
+  readonly accepted?: boolean;
   readonly response?: string;
   readonly error?: string | { code?: string; message?: string };
   readonly details?: {
@@ -92,6 +93,7 @@ export interface AgentResponse {
     readonly creationDraft?: unknown;
     readonly messages?: ReadonlyArray<SessionMessage>;
   };
+  readonly task?: StudioTaskSnapshot;
   readonly request?: unknown;
 }
 

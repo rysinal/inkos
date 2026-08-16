@@ -274,6 +274,26 @@ describe("mergeTaskExecution", () => {
     expect(messages[0]?.toolExecutions).toEqual([tagged]);
     expect(messages[0]?.parts).toEqual([{ type: "tool", execution: tagged }]);
   });
+
+  it("does not downgrade a terminal task when an older running snapshot arrives late", () => {
+    const running = exec({ id: "task-1", tool: "script_create", status: "running", startedAt: 10 });
+    const completed = exec({
+      id: "task-1",
+      tool: "script_create",
+      status: "completed",
+      result: "完成",
+      startedAt: 10,
+      completedAt: 20,
+    });
+
+    const messages = mergeTaskExecution(mergeTaskExecution([], completed), running);
+
+    expect(messages[0]?.toolExecutions?.[0]).toMatchObject({
+      status: "completed",
+      result: "完成",
+      completedAt: 20,
+    });
+  });
 });
 
 describe("hasInFlightExecution", () => {

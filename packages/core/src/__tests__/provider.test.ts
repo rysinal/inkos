@@ -1154,6 +1154,19 @@ describe("stream interruption detection", () => {
     });
   }
 
+  function nativeResponsesStreamClient(): LLMClient {
+    return makeClient(0.7, {
+      service: "custom",
+      apiFormat: "responses",
+      stream: true,
+      _piModel: {
+        ...MOCK_PI_MODEL,
+        provider: "openai",
+        baseUrl: "https://gateway.example/v1",
+      },
+    });
+  }
+
   const COMPLETE_SSE = [
     "data: {\"choices\":[{\"delta\":{\"content\":\"完整的正文内容\"}}]}\n\n",
     "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
@@ -1171,6 +1184,28 @@ describe("stream interruption detection", () => {
     const result = await chatCompletion(nativeStreamClient(), "glm-compat", [{ role: "user", content: "写第1章" }]);
 
     expect(result.content).toBe("完整的正文内容");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+  });
+
+  it("retries an empty Responses stream and succeeds when the next attempt has text", async () => {
+    const empty = 'data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}\n\n';
+    const complete = [
+      'data: {"type":"response.output_text.delta","delta":"完整修订内容"}\n\n',
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":4,"total_tokens":5}}}\n\n',
+    ].join("");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(sseResponse(empty))
+      .mockResolvedValueOnce(sseResponse(complete));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await chatCompletion(
+      nativeResponsesStreamClient(),
+      "gpt-compatible",
+      [{ role: "user", content: "修订第7章" }],
+    );
+
+    expect(result.content).toBe("完整修订内容");
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
   });

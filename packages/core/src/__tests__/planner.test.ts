@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PlannerAgent } from "../agents/planner.js";
+import { getPlannerMemoSystemPrompt } from "../agents/planner-prompts.js";
 import * as llmProvider from "../llm/provider.js";
 import type { LLMClient } from "../llm/provider.js";
 import type { BookConfig } from "../models/book.js";
@@ -131,6 +132,16 @@ describe("PlannerAgent.planChapter memo generation", () => {
       bookId: "book-plan-1",
     });
   }
+
+  it.each([
+    ["zh" as const, "每个必填段落的正文必须至少包含 20 个非空字符", "不适用 - 本章为高压冲突章节，但冲突段仍需推进压力、证据或人物选择。"],
+    ["en" as const, "Every required section body must contain at least 20 non-whitespace characters", "Not applicable - this is a high-pressure conflict chapter, but the conflict must still advance pressure, evidence, or character choice."],
+  ])("keeps the %s memo instructions consistent with parser minimums", (language, contract, example) => {
+    const prompt = getPlannerMemoSystemPrompt(language);
+
+    expect(prompt).toContain(contract);
+    expect(prompt).toContain(example);
+  });
 
   it("produces a valid ChapterMemo when the LLM returns well-formed output", async () => {
     const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({

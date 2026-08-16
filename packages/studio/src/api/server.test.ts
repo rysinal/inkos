@@ -667,6 +667,14 @@ describe("createStudioServer daemon lifecycle", () => {
     await rm(join(tmpdir(), "inkos-global.env"), { force: true });
   });
 
+  async function waitForTaskStatus(sessionId: string, status: "completed" | "error") {
+    await vi.waitFor(async () => {
+      const task = await loadStudioTaskSnapshot(root, sessionId);
+      expect(task?.execution.status).toBe(status);
+    });
+    return loadStudioTaskSnapshot(root, sessionId);
+  }
+
   it("uses the real core bookId validator in the Studio safety mock", async () => {
     const { isSafeBookId } = await import("@actalk/inkos-core");
 
@@ -3045,6 +3053,38 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(response.json()).resolves.toEqual({ ok: true, aborted: true });
   });
 
+  it("keeps the SSE event stream alive with a server heartbeat every 15 seconds", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    vi.useFakeTimers();
+    try {
+      const { createStudioServer } = await import("./server.js");
+      const app = createStudioServer(cloneProjectConfig() as never, root);
+      const response = await app.request("http://localhost/api/v1/events?sessionId=heartbeat-session");
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      if (!reader) throw new Error("SSE response body is missing");
+
+      const initial = await reader.read();
+      expect(new TextDecoder().decode(initial.value)).toContain("event: ping");
+      await new Promise((resolve) => realSetTimeout(resolve, 10));
+
+      const nextChunk = Promise.race([
+        reader.read(),
+        new Promise<"timeout">((resolve) => realSetTimeout(() => resolve("timeout"), 50)),
+      ]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      const heartbeat = await nextChunk;
+
+      expect(heartbeat).not.toBe("timeout");
+      if (heartbeat !== "timeout") {
+        expect(new TextDecoder().decode(heartbeat.value)).toContain("event: ping");
+      }
+      await reader.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("routes /api/agent through runAgentSession and returns response + sessionId", async () => {
     runAgentSessionMock.mockImplementationOnce(async (config: { onEvent?: (event: unknown) => void }) => {
       config.onEvent?.({
@@ -3186,7 +3226,7 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(runAgentSessionMock).not.toHaveBeenCalled();
     expect(initBookMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3201,8 +3241,10 @@ describe("createStudioServer daemon lifecycle", () => {
       { externalContext: "创建《夜间派送》，番茄，100章以内。" },
     );
     await expect(response.json()).resolves.toMatchObject({
-      session: { activeBookId: "夜间派送" },
+      accepted: true,
+      task: { execution: { status: "running" } },
     });
+    await waitForTaskStatus("agent-session-1", "completed");
   });
 
   it("infers English before directly executing a confirmed short action", async () => {
@@ -3240,16 +3282,17 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(runAgentSessionMock).not.toHaveBeenCalled();
     expect(createShortFictionRunToolMock).toHaveBeenCalledWith(
       expect.anything(),
       root,
       expect.objectContaining({ language: "en" }),
     );
+    await waitForTaskStatus("short-en-session", "completed");
   });
 
-  it("persists confirmed production progress before the long-running request completes", async () => {
+  it("accepts a confirmed production task before the long-running work completes", async () => {
     let resolveInitBook!: () => void;
     initBookMock.mockImplementationOnce(() => new Promise<void>((resolve) => {
       resolveInitBook = resolve;
@@ -3281,25 +3324,35 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    await vi.waitFor(async () => {
-      const task = await loadStudioTaskSnapshot(root, "long-task-session");
-      expect(task?.execution).toMatchObject({
-        tool: "sub_agent",
-        agent: "architect",
-        status: "running",
-      });
+    const accepted = await Promise.race([
+      pendingResponse,
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
+    ]);
+
+    expect(accepted).not.toBe("timeout");
+    if (accepted === "timeout") throw new Error("production task acceptance timed out");
+    expect(accepted.status).toBe(202);
+    await expect(accepted.json()).resolves.toMatchObject({
+      task: {
+        sessionId: "long-task-session",
+        execution: {
+          tool: "sub_agent",
+          agent: "architect",
+          status: "running",
+        },
+      },
     });
 
     resolveInitBook();
-    const response = await pendingResponse;
-    expect(response.status).toBe(200);
-    await expect(loadStudioTaskSnapshot(root, "long-task-session")).resolves.toMatchObject({
-      execution: {
-        tool: "sub_agent",
-        agent: "architect",
-        status: "completed",
-        completedAt: expect.any(Number),
-      },
+    await vi.waitFor(async () => {
+      await expect(loadStudioTaskSnapshot(root, "long-task-session")).resolves.toMatchObject({
+        execution: {
+          tool: "sub_agent",
+          agent: "architect",
+          status: "completed",
+          completedAt: expect.any(Number),
+        },
+      });
     });
   });
 
@@ -3332,8 +3385,8 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    expect(response.status).toBeGreaterThanOrEqual(400);
-    await expect(loadStudioTaskSnapshot(root, "failed-task-session")).resolves.toMatchObject({
+    expect(response.status).toBe(202);
+    await expect(waitForTaskStatus("failed-task-session", "error")).resolves.toMatchObject({
       execution: {
         tool: "sub_agent",
         agent: "architect",
@@ -3342,6 +3395,31 @@ describe("createStudioServer daemon lifecycle", () => {
         completedAt: expect.any(Number),
       },
     });
+  });
+
+  it("reports task startup persistence failures as internal errors instead of 502", async () => {
+    appendManualSessionMessagesMock.mockRejectedValueOnce(new Error("disk write failed"));
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "继续",
+        activeBookId: "demo-book",
+        sessionId: "agent-session-1",
+        sessionKind: "book",
+        actionSource: "quick-action",
+        requestedIntent: "write_next",
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "AGENT_ERROR", message: "disk write failed" },
+    });
+    await expect(loadStudioTaskSnapshot(root, "agent-session-1")).resolves.toBeNull();
   });
 
   it("returns the persisted task snapshot with session detail while the task is still running", async () => {
@@ -3397,6 +3475,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     resolveInitBook();
     await pendingResponse;
+    await waitForTaskStatus("refresh-task-session", "completed");
   });
 
   it("rewrites a stale running task snapshot to error when the server has no live task for it", async () => {
@@ -3507,7 +3586,8 @@ describe("createStudioServer daemon lifecycle", () => {
 
     handle.resolveShort();
     const response = await pendingTask;
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
+    await waitForTaskStatus("instr-short-session", "completed");
 
     // 任务完成后：指令只出现一次，助手工具消息排在其后。
     const final = await app.request("http://localhost/api/v1/sessions/instr-short-session");
@@ -3573,7 +3653,8 @@ describe("createStudioServer daemon lifecycle", () => {
 
     handle.resolveShort();
     const response = await pendingTask;
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
+    await waitForTaskStatus("order-short-session", "completed");
 
     const final = await app.request("http://localhost/api/v1/sessions/order-short-session");
     const finalBody = await final.json() as {
@@ -3614,7 +3695,8 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBe(202);
+    await waitForTaskStatus("fail-short-session", "error");
     const final = await app.request("http://localhost/api/v1/sessions/fail-short-session");
     const finalBody = await final.json() as {
       session: { messages: Array<{ role: string; content: string }> };
@@ -3688,7 +3770,7 @@ describe("createStudioServer daemon lifecycle", () => {
     resolveInitBook();
     await pendingTask;
     // 第一个任务不受影响，正常完成
-    await expect(loadStudioTaskSnapshot(root, "busy-task-session")).resolves.toMatchObject({
+    await expect(waitForTaskStatus("busy-task-session", "completed")).resolves.toMatchObject({
       execution: { status: "completed" },
     });
   });
@@ -3742,7 +3824,7 @@ describe("createStudioServer daemon lifecycle", () => {
     const responses = await Promise.all([request("并发一"), request("并发二")]);
 
     const statuses = responses.map((response) => response.status).sort();
-    expect(statuses).toEqual([200, 409]);
+    expect(statuses).toEqual([202, 409]);
     const rejected = responses.find((response) => response.status === 409)!;
     await expect(rejected.json()).resolves.toMatchObject({
       error: { code: "PRODUCTION_TASK_ALREADY_RUNNING" },
@@ -3750,7 +3832,7 @@ describe("createStudioServer daemon lifecycle", () => {
     // 败者的任务没有真正启动
     expect(initBookMock).toHaveBeenCalledTimes(1);
     // 胜者的任务不受影响，快照收敛为 completed
-    await expect(loadStudioTaskSnapshot(root, "race-task-session")).resolves.toMatchObject({
+    await expect(waitForTaskStatus("race-task-session", "completed")).resolves.toMatchObject({
       execution: { status: "completed" },
     });
   });
@@ -3815,6 +3897,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     resolveInitBook();
     await pendingTask;
+    await waitForTaskStatus("parallel-chat-session", "completed");
 
     // 任务结束后：新一轮聊天不再禁用生产工具，也不再注入任务状态块
     runAgentSessionMock.mockResolvedValueOnce({ responseText: "任务已经完成。", messages: [] });
@@ -3959,7 +4042,8 @@ describe("createStudioServer daemon lifecycle", () => {
 
     resolveInitBook();
     const taskResponse = await pendingTask;
-    expect(taskResponse.status).toBe(200);
+    expect(taskResponse.status).toBe(202);
+    await waitForTaskStatus("tagged-log-session", "completed");
 
     // 任务结束后：同会话新一轮聊天的日志同样不带已结束任务的 execution id
     runAgentSessionMock.mockImplementationOnce(async () => {
@@ -4044,7 +4128,7 @@ describe("createStudioServer daemon lifecycle", () => {
         actionPayload: { shortRun: { direction: "冷库账本悬疑", cover: false } },
       }),
     });
-    expect(taskResponse.status).toBe(200);
+    expect(taskResponse.status).toBe(202);
     const findToolStart = (predicate: (data: Record<string, unknown>) => boolean) =>
       sseEvents.find((entry) => entry.event === "tool:start" && entry.data !== null && predicate(entry.data));
     await vi.waitFor(() => {
@@ -4055,6 +4139,7 @@ describe("createStudioServer daemon lifecycle", () => {
       background: true,
       sourceRequestId: "client-request-1",
     });
+    await waitForTaskStatus("bg-flag-session", "completed");
 
     // 聊天轮工具的 tool:start 不带 background 标记，前端维持聊天轮分类。
     runAgentSessionMock.mockImplementationOnce(async (config: { onEvent?: (event: unknown) => void }) => {
@@ -4143,6 +4228,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     resolveRun();
     await pendingTask;
+    await waitForTaskStatus("chat-scope-session", "completed");
   });
 
   it("aborts the running production task and drops its snapshot when the session is deleted", async () => {
@@ -4195,8 +4281,11 @@ describe("createStudioServer daemon lifecycle", () => {
 
     // 等任务的错误路径走完：中止后的错误持久化不能把已删除会话的快照重建出来
     const response = await pendingTask;
-    expect(response.status).toBeGreaterThanOrEqual(400);
-    await expect(access(studioTaskSnapshotPath(root, "deleted-task-session"))).rejects.toThrow();
+    expect(response.status).toBe(202);
+    await vi.waitFor(async () => {
+      await expect(access(studioTaskSnapshotPath(root, "deleted-task-session"))).rejects.toThrow();
+      await expect(actual.loadBookSession(root, "deleted-task-session")).resolves.toBeNull();
+    });
     // 任务失败路径的助手消息追加也不能把已删除会话的 transcript 文件与
     // sessions 目录条目重建出来（appendTranscriptEvents 底层是 mkdir+appendFile）
     await expect(access(actual.transcriptPath(root, "deleted-task-session"))).rejects.toThrow();
@@ -4278,8 +4367,9 @@ describe("createStudioServer daemon lifecycle", () => {
 
     window.releaseInstructionAppend();
     const response = await pendingTask;
-    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBe(202);
     expect(window.getCapturedSignal()?.aborted).toBe(true);
+    await waitForTaskStatus("window-abort-session", "error");
   });
 
   it("aborts a just-started task from memory when its session is deleted before the first snapshot persists", async () => {
@@ -4299,10 +4389,12 @@ describe("createStudioServer daemon lifecycle", () => {
     window.releaseInstructionAppend();
     const response = await pendingTask;
     // 删除会话必须中止窗口内刚启动的任务
-    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBe(202);
     expect(window.getCapturedSignal()?.aborted).toBe(true);
     // 已删除会话的快照不会被任务的后续持久化重建出来
-    await expect(access(studioTaskSnapshotPath(root, "window-delete-session"))).rejects.toThrow();
+    await vi.waitFor(async () => {
+      await expect(access(studioTaskSnapshotPath(root, "window-delete-session"))).rejects.toThrow();
+    });
   });
 
   it("executes confirmed play-start action directly without asking the chat model to call tools", async () => {
@@ -4345,20 +4437,19 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(runAgentSessionMock).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toMatchObject({
+      accepted: true,
       response: "",
-      details: {
-        toolExecutions: [
-          expect.objectContaining({
-            tool: "play_start",
-            status: "completed",
-            result: "暴雨敲着铁皮门，封存档案箱压在门口。",
-          }),
-        ],
-      },
+      task: { execution: { tool: "play_start", status: "running" } },
       session: { sessionId: "play-session-1", sessionKind: "play" },
+    });
+    await expect(waitForTaskStatus("play-session-1", "completed")).resolves.toMatchObject({
+      execution: {
+        tool: "play_start",
+        result: "暴雨敲着铁皮门，封存档案箱压在门口。",
+      },
     });
     // 任务开始时：指令作为 user 消息预写进 transcript。
     expect(appendManualSessionMessagesMock).toHaveBeenCalledWith(
@@ -4439,11 +4530,10 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    const body = await response.json();
-    expect(response.status, JSON.stringify(body)).toBe(200);
-    expect(body.response).toBe("");
-    expect(body.details?.toolExecutions?.[0]?.result).toContain("主演栏写着赵铁生");
-    expect(body.details?.toolExecutions?.[0]?.result).not.toContain("主演栏里有个名字叫");
+    expect(response.status).toBe(202);
+    const task = await waitForTaskStatus("play-session-truncated", "completed");
+    expect(task?.execution.result).toContain("主演栏写着赵铁生");
+    expect(task?.execution.result).not.toContain("主演栏里有个名字叫");
     await expect(readFile(join(root, "worlds", "play-session-truncated", "runs", "main", "projections", "scene.md"), "utf-8"))
       .resolves.toContain("主演栏写着赵铁生");
   });
@@ -4465,13 +4555,10 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    const body = await response.json();
-    expect(response.status, JSON.stringify(body)).toBe(200);
-    expect(body).toMatchObject({
-      response: expect.stringContaining("已为 demo-book 完成第 3 章"),
-      session: {
-        sessionId: "agent-session-1",
-        activeBookId: "demo-book",
+    expect(response.status).toBe(202);
+    await expect(waitForTaskStatus("agent-session-1", "completed")).resolves.toMatchObject({
+      execution: {
+        result: expect.stringContaining("已为 demo-book 完成第 3 章"),
       },
     });
     expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book");
@@ -4542,9 +4629,10 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    const body = await response.json();
-    expect(response.status, JSON.stringify(body)).toBe(200);
-    expect(body.response).toContain("已连续完成 2 章");
+    expect(response.status).toBe(202);
+    await expect(waitForTaskStatus("agent-session-1", "completed")).resolves.toMatchObject({
+      execution: { result: expect.stringContaining("已连续完成 2 章") },
+    });
     expect(writeChaptersMock).toHaveBeenCalledWith(
       "demo-book",
       2,
@@ -4578,12 +4666,10 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      response: expect.stringContaining("审稿未通过"),
-      session: {
-        sessionId: "agent-session-1",
-        activeBookId: "demo-book",
+    expect(response.status).toBe(202);
+    await expect(waitForTaskStatus("agent-session-1", "error")).resolves.toMatchObject({
+      execution: {
+        result: expect.stringContaining("审稿未通过"),
       },
     });
     expect(appendManualSessionMessagesMock).toHaveBeenCalledWith(
@@ -4627,10 +4713,9 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toMatchObject({
-      error: { code: "BOOK_BUSY", message: lockError },
-      response: lockError,
+    expect(response.status).toBe(202);
+    await expect(waitForTaskStatus("agent-session-1", "error")).resolves.toMatchObject({
+      execution: { error: lockError },
     });
   });
 
@@ -4673,14 +4758,13 @@ describe("createStudioServer daemon lifecycle", () => {
       auditResult: { passed: true, issues: [], summary: "rewritten" },
     });
     const response = await pendingResponse;
-    const body = await response.json();
-    expect(response.status, JSON.stringify(body)).toBe(200);
-    expect(body.response).toContain("已为 demo-book 完成第 3 章");
-    await expect(loadStudioTaskSnapshot(root, "agent-session-1")).resolves.toMatchObject({
+    expect(response.status).toBe(202);
+    await expect(waitForTaskStatus("agent-session-1", "completed")).resolves.toMatchObject({
       execution: {
         tool: "sub_agent",
         agent: "writer",
         status: "completed",
+        result: expect.stringContaining("已为 demo-book 完成第 3 章"),
         completedAt: expect.any(Number),
       },
     });
@@ -4723,8 +4807,8 @@ describe("createStudioServer daemon lifecycle", () => {
     // 真实 pipeline 会在下一个检查点抛出中止错误，这里手动模拟这次拒绝
     rejectWrite(new Error("This operation was aborted"));
     const response = await pendingResponse;
-    expect(response.status).toBeGreaterThanOrEqual(400);
-    await expect(loadStudioTaskSnapshot(root, "agent-session-1")).resolves.toMatchObject({
+    expect(response.status).toBe(202);
+    await expect(waitForTaskStatus("agent-session-1", "error")).resolves.toMatchObject({
       execution: { status: "error", completedAt: expect.any(Number) },
     });
   });
@@ -4782,7 +4866,7 @@ describe("createStudioServer daemon lifecycle", () => {
       auditResult: { passed: true, issues: [], summary: "rewritten" },
     });
     await pendingResponse;
-    await expect(loadStudioTaskSnapshot(root, "agent-session-1")).resolves.toMatchObject({
+    await expect(waitForTaskStatus("agent-session-1", "completed")).resolves.toMatchObject({
       execution: { status: "completed" },
     });
   });
@@ -4827,13 +4911,10 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    const body = await response.json();
-    expect(response.status, JSON.stringify(body)).toBe(200);
-    expect(body).toMatchObject({
-      response: expect.stringContaining("已为 demo-book 完成第 3 章"),
-      session: {
-        sessionId: "agent-session-1",
-        activeBookId: "demo-book",
+    expect(response.status).toBe(202);
+    await expect(waitForTaskStatus("agent-session-1", "completed")).resolves.toMatchObject({
+      execution: {
+        result: expect.stringContaining("已为 demo-book 完成第 3 章"),
       },
     });
     expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book");
@@ -5663,6 +5744,52 @@ describe("createStudioServer daemon lifecycle", () => {
       response: lockError,
     });
     expect(chatCompletionMock).not.toHaveBeenCalled();
+  });
+
+  it("returns state-degraded continuation blockers as a 409 action conflict", async () => {
+    const conflict = "Latest chapter 7 is state-degraded. Repair state or rewrite that chapter before continuing.";
+    runAgentSessionMock.mockResolvedValueOnce({
+      responseText: "",
+      errorMessage: conflict,
+      messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: conflict }],
+    });
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: "检查当前写作状态", activeBookId: "demo-book", sessionId: "agent-session-1" }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "AGENT_ACTION_CONFLICT", message: conflict },
+      response: conflict,
+    });
+  });
+
+  it("returns export requests without chapters as a 409 action conflict", async () => {
+    const conflict = "No chapters to export.";
+    runAgentSessionMock.mockResolvedValueOnce({
+      responseText: "",
+      errorMessage: conflict,
+      messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: conflict }],
+    });
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: "检查是否可以导出", activeBookId: "demo-book", sessionId: "agent-session-1" }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "AGENT_ACTION_CONFLICT", message: conflict },
+      response: conflict,
+    });
   });
 
   it("does not replace an empty agent response with a second plain-chat call", async () => {
